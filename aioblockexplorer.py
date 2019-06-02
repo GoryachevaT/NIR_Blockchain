@@ -19,7 +19,7 @@ PROXY_ITER = {
 
 
 USE_PROXY = 'SOCKS'  # False, 'HTTP', 'SOCKS'
-FETCH_ATTEMPTS = 3
+FETCH_ATTEMPTS = 5
 FETCH_TIMEOUT = 10
 
 
@@ -78,7 +78,7 @@ async def fetch(url, params=None, attempts=FETCH_ATTEMPTS, use_proxy=USE_PROXY):
                 else:  # всё ок
                     data = await response.json()
                     return data
-        except (asyncio.TimeoutError, SocksError, SocksConnectionError, ConnectionResetError, aiohttp.client_exceptions.ClientError) as e:
+        except (asyncio.TimeoutError, SocksError, SocksConnectionError, ConnectionResetError, BrokenPipeError, aiohttp.client_exceptions.ClientError) as e:
         # except (ValueError) as e:  # ловлю левое исключение, чтобы отловить ошибки при тесте
             # получили ошибку (при работе через прокси-сервер или еще какую, от aiohttp)
             print(f'exception @ {params}:', e, str(e))
@@ -87,83 +87,83 @@ async def fetch(url, params=None, attempts=FETCH_ATTEMPTS, use_proxy=USE_PROXY):
     # а тут мы очутимся, если все попытки пройдут безуспешно, тогда функция по умолчанию вернет return None
 
 
-# async def get_transactions_by_address(addr, page=0):
-#     # ультра-мелкая обертка для удобства
-#     # return await fetch("https://httpbin.org/json")
-#     print(f'page={page}: getting transactions...')
-#     data = await fetch("https://blockexplorer.com/api/txs/", params={"address": addr, "pageNum": page})
+async def get_transactions_by_address(addr, page=0):
+    # ультра-мелкая обертка для удобства
+    # return await fetch("https://httpbin.org/json")
+    print(f'page={page}: getting transactions...')
+    data = await fetch("https://blockexplorer.com/api/txs/", params={"address": addr, "pageNum": page})
 
-#     if data and 'txs' in data:
-#         txs = data['txs']
-#         pages = data['pagesTotal']
-#         print(f'page={page}: got {len(txs)} transactions ({pages} pages total).')
-#     else:
-#         print(f'page={page}: error :(')
-#     return data
+    if data and 'txs' in data:
+        txs = data['txs']
+        pages = data['pagesTotal']
+        print(f'page={page}: got {len(txs)} transactions ({pages} pages total).')
+    else:
+        print(f'page={page}: error :(')
+    return data
 
-# async def get_all_transactions_by_address(addr):
-#     # получаем первую страницу
-#     data = await get_transactions_by_address(addr)
-#     if not data:
-#         print("не удалось забрать инфу по этому адресу((( или нет транзакций")
-#         return
+async def get_all_transactions_by_address(addr):
+    # получаем первую страницу
+    data = await get_transactions_by_address(addr)
+    if not data:
+        print("не удалось забрать инфу по этому адресу((( или нет транзакций")
+        return
     
-#     pages = data['pagesTotal']
+    pages = data['pagesTotal']
 
-#     all_txs = []  # тут будут все транзакции
+    all_txs = []  # тут будут все транзакции
 
-#     
-#     all_txs += data['txs']  # запихнем туда транзакции из первой страницы, которые скачали ранее
-
-#     # делаем список из корутин (запланированных для дальнейшего выполнения параллельно функций)
-#     # для скачивания страниц со второй по последнюю
-#     tasks = [get_transactions_by_address(addr, page=page) for page in range(1, pages)]
-
-#     # брать их все одновременно, если там 40+ страниц - так себе идея
-#     # разобьем на куски по 8
-#     chunks = chunkify(tasks, 8)
-
-#     for chunk in chunks:
-#         # отправляем одновременно 8 запросов по странице
-#         chunk_results = await asyncio.gather(*chunk)
-
-#         for result in chunk_results:
-#             if not result:  # упс, при попытке получить данные по какой-то странице вернулась ошибочка
-#                 print(f"Got no data (out of attempts/timeout/etc) :(")
-#                 continue  # пропускаем эту страницу нафиг. [TODO]: пробовать еще раз до победного конца
-#             all_txs += result['txs']
-
-#     return all_txs
-
-
-# def main():
-#     if len(sys.argv) == 2:
-#         addr = sys.argv[1]
-#     else:
-#         # addr = '3H23DyudPTpyK1dEj6vxzUpuczFcue7YKR'
-#         print('Usage: python aioblockexplorer.py <address>')
-#         return
     
-#     filename = f'transactions_{addr}.json'
+    all_txs += data['txs']  # запихнем туда транзакции из первой страницы, которые скачали ранее
 
-#     if os.path.exists(filename):
-#         print(f"{filename} already exists. Skipping...")
-#         return
+    # делаем список из корутин (запланированных для дальнейшего выполнения параллельно функций)
+    # для скачивания страниц со второй по последнюю
+    tasks = [get_transactions_by_address(addr, page=page) for page in range(1, pages)]
 
-#     data = asyncio.get_event_loop().run_until_complete(
-#         get_all_transactions_by_address(addr)
-#     )
+    # брать их все одновременно, если там 40+ страниц - так себе идея
+    # разобьем на куски по 8
+    chunks = chunkify(tasks, 8)
 
-#     # # отображаем результат выполнения get_all_transactions_by_address
-#     # print(data)
+    for chunk in chunks:
+        # отправляем одновременно 8 запросов по странице
+        chunk_results = await asyncio.gather(*chunk)
 
-#     # сохраняем в json файлик, если есть что сохранять ваще
-#     if data:
-#         with open(filename, 'w') as f:
-#             json.dump(data, f)
+        for result in chunk_results:
+            if not result:  # упс, при попытке получить данные по какой-то странице вернулась ошибочка
+                print(f"Got no data (out of attempts/timeout/etc) :(")
+                continue  # пропускаем эту страницу нафиг. [TODO]: пробовать еще раз до победного конца
+            all_txs += result['txs']
 
-#         print(f"Exported to {filename}")
+    return all_txs
 
 
-# if __name__ == '__main__':
-#     main()
+def main():
+    if len(sys.argv) == 2:
+        addr = sys.argv[1]
+    else:
+        # addr = '3H23DyudPTpyK1dEj6vxzUpuczFcue7YKR'
+        print('Usage: python aioblockexplorer.py <address>')
+        return
+    
+    filename = f'transactions_{addr}.json'
+
+    if os.path.exists(filename):
+        print(f"{filename} already exists. Skipping...")
+        return
+
+    data = asyncio.get_event_loop().run_until_complete(
+        get_all_transactions_by_address(addr)
+    )
+
+    # # отображаем результат выполнения get_all_transactions_by_address
+    # print(data)
+
+    # сохраняем в json файлик, если есть что сохранять ваще
+    if data:
+        with open(filename, 'w') as f:
+            json.dump(data, f)
+
+        print(f"Exported to {filename}")
+
+
+if __name__ == '__main__':
+    main()

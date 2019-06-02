@@ -9,6 +9,7 @@ from statistics import mean
 from aioblockexplorer import chunkify, fetch
 from proxy_list import tr_list, addr_list
 import sys
+import re
 import math
 
 
@@ -20,26 +21,31 @@ os.makedirs(CACHE_DIR_ADDS, exist_ok=True)
 curr_tr_list = tr_list
 curr_add_list = addr_list
 path_tx_fin = './tx_json.json'
-path_add_fin = './add_json.json'
+path_add_fin = './add_jsons'
 
 
 async def get_tx(txid, attempts=5):
     #print('get_tx:', txid)
     path = f'{CACHE_DIR_TX}/{txid}.json'
     if os.path.exists(path):
+        #print(f'{txid} exists')
         for attempt in range(attempts):
-            try:
-                async with aiofiles.open(path, 'r') as f:
-                    data = ujson.loads(await f.read())
-                return data
-            except (OSError) as e:
-                print(f'exception:', e, str(e))
-                continue  # пробуем еще раз
+           try:
+                try:
+                    async with aiofiles.open(path, 'r') as f:
+                        data = ujson.loads(await f.read())
+                    return data
+                except (ValueError) as e:
+                    return {"data": {"hash": txid}, "err_no": 666}
+           except (OSError) as e:
+               print(f'exception:', e, str(e))
+               continue  # пробуем еще раз
     else:
         for attempt in range(attempts):
+            #print(f'{txid} is new')
             data = await fetch(f'https://chain.api.btc.com/v3/tx/{txid}')
-            if data.get('err_no', 0) == 2:
-                print(f'{txid}: {data}')
+            if not data or data.get('err_no', 0) == 2:
+                #print(f'{txid}: {data}')
                 continue
             else: 
                 async with aiofiles.open(path, 'w') as f:
@@ -52,8 +58,6 @@ async def get_tx(txid, attempts=5):
     return data
 
 
-
-
 async def get_transactions_by_address(addr, page=1):
     data = await fetch(f'https://chain.api.btc.com/v3/address/{addr}/tx?page={page}')
     if data and 'data' in data:
@@ -61,7 +65,10 @@ async def get_transactions_by_address(addr, page=1):
         total_count = data['data']['total_count']
         pagesize = 50
         pages = math.ceil(total_count/pagesize)
-    return data['data']
+        return data['data']
+    else:
+        return {"data": {"hash": None}, "err_no": 666}
+
 
 
 async def get_all_transactions_by_address(addr):
@@ -173,9 +180,10 @@ async def create_time_features(err, row, addr_list, addr_type, attempts=3):
                                      meta_value_field: val
                                      })
             except TypeError as e:  
-                print(f'exception:', e, str(e))
+                #print(f'exception:', e, str(e))
                 #print(tmp_tx)
                 #print(attempt)
+
                 continue  # пробуем еще раз
 
 
@@ -201,19 +209,16 @@ async def create_time_features(err, row, addr_list, addr_type, attempts=3):
         row[f'avg_{meta_agg_value_field}'] = None
     row[f'list_of_{addr_type}'] = meta_tr_dict
 
-    return row, txs
+    return err, row, txs
 
  
 async def time_features(row, tx):
     new_txs = []
     err = []
-
-    row, txs = await create_time_features(err=err, row=row, addr_list=tx['inputs'], addr_type='input')
+    err, row, txs = await create_time_features(err=err, row=row, addr_list=tx['inputs'], addr_type='input')
     new_txs += txs
-
-    row, txs = await create_time_features(err=err, row=row, addr_list=tx['outputs'], addr_type='output')
+    err, row, txs = await create_time_features(err=err, row=row, addr_list=tx['outputs'], addr_type='output')
     new_txs += txs
-
     return err, row, new_txs
 
 
@@ -235,59 +240,113 @@ def diff_time_features(row):
 
 
 async def create_row(tx):
+    print(tx['hash'])
     row = {}
     row = tr_features(row, tx)
     row = inp_outp_features(row, tx)
     err, row, new_txs = await time_features(row, tx)
-    print(f'errors: {err}')
+    #print(f'errors: {err}')
     row = diff_time_features(row)
     new_inp_adds = [x['prev_address'] for x in row['list_of_input']]
     new_outp_adds = [x['next_address'] for x in row['list_of_output']]
     return row, new_txs, new_inp_adds, new_outp_adds
 
 
-async def get_info_by_transaction_list(curr_tr_list, path_fin, n=4):
+async def get_info_by_transaction_list(curr_tr_list, path_fin, n=3):
     df = {}
     finished_txs = []
     for i in range(n): 
         next_level_txs = []
-        print(f'level {i+1} of {n}')
-        for j, txid in enumerate(curr_tr_list):
-            print(f'transaction {j+1} of {len(curr_tr_list)}: {txid}')
-            tx = await get_tx(txid)
-            row, new_txs, new_inp_adds, new_outp_adds = await create_row(tx)
-            df[row['txid']] = row
-            print()
-            next_level_txs.extend(new_txs)
+        print()
+        print('\n===========================================================================================================\
+               \n===========================================================================================================')
+
+
+        tx_tasks = [get_tx(tx) for tx in curr_tr_list]        
+        tx_chunks_size = 16
+        tx_chunks = list(chunkify(tx_tasks, tx_chunks_size))
+        print('transactions:', len(curr_tr_list), 'chunks:', len(tx_chunks))
+        for chunk_i, tx_chunk in enumerate(tx_chunks, start=1):
+            
+            print('\n==================================================================================')
+            print(f'[tx chunk #{chunk_i}/{len(tx_chunks)}]: fetching...')
+            data = await asyncio.gather(*tx_chunk)
+
+
+            create_row_tasks = [create_row(tx['data']) for tx in data]        
+            create_row_chunks_size = 8
+            create_row_chunks = list(chunkify(create_row_tasks, create_row_chunks_size))
+            print('txs to create new rows:', len(data), 'chunks:', len(create_row_chunks))
+            for chunk_j, create_row_chunk in enumerate(create_row_chunks, start=1):
+                
+                print('\n===========================================')
+                print(f'[create_row chunk #{chunk_j}/{len(create_row_chunks)}]: fetching...')
+                new_rows = await asyncio.gather(*create_row_chunk)
+
+                for step in new_rows:
+                    row, new_txs, new_inp_adds, new_outp_adds = step[0], step[1], step[2], step[3]
+                    df[row['txid']] = row
+                    next_level_txs += new_txs
+
+            # for tx in data:
+            #     row, new_txs, new_inp_adds, new_outp_adds = await create_row(tx['data'])
+            #     df[row['txid']] = row
+            #     print()
+            #     next_level_txs += new_txs
+
         finished_txs.extend(curr_tr_list)
         curr_tr_list = next_level_txs
+
+
+
+        # for j, txid in enumerate(curr_tr_list):
+        #     print(f'transaction {j+1} of {len(curr_tr_list)}: {txid}')
+        #     tx = await get_tx(txid)
+        #     row, new_txs, new_inp_adds, new_outp_adds = await create_row(tx['data'])
+        #     df[row['txid']] = row
+        #     print()
+        #     next_level_txs.extend(new_txs)
+        # finished_txs.extend(curr_tr_list)
+        # curr_tr_list = next_level_txs
+
     async with aiofiles.open(path_fin, 'a') as f:
         await f.write(ujson.dumps(df))
 
 
-async def get_info_by_address_list(curr_add_list, path_fin, n=2):
+async def get_info_by_address_list(curr_add_list, path_fin, n=1):
 
-    df = {}
-    finished_adds = []
+    with open('./finished_adds', 'r') as f:
+        finished_adds = f.read()
+
+    with open('./1_level_adds', 'r') as f:
+        curr_add_list_read = f.read()
+
+    curr_add_list_read = re.sub('[\[\]\"]', '', curr_add_list_read).split(',')
+    finished_adds = re.sub('[\[\]\"]', '', finished_adds).split(',')
+
+    #finished_adds = []
     add_errors = []
+
+    curr_add_list_new = [add for add in curr_add_list_read if add not in finished_adds]
 
     for i in range(n): 
         next_level_adds = []
-        print('\n===========================================================================================================================\
-               \n===========================================================================================================================\
-               \n===========================================================================================================================')
+        print('\n===========================================================================================================\
+               \n===========================================================================================================')
         print(f'level {i+1} of {n}')
 
 
-        add_tasks = [get_all_transactions_by_address(add) for add in curr_add_list]        
+        add_tasks = [get_all_transactions_by_address(add) for add in curr_add_list_new]    
+        addresses = [add for add in curr_add_list_new]     
         add_chunks_size = 5
-        add_chunks = list(chunkify(add_tasks, add_chunks_size))
-        print('adds:', len(curr_add_list), 'chunks:', len(add_chunks))
-        for chunk_i, add_chunk in enumerate(add_chunks, start=1):
+        add_info_chunks = list(chunkify(add_tasks, add_chunks_size))
+        add_list_chunks = list(chunkify(addresses, add_chunks_size))
+        print('adds:', len(curr_add_list_new), 'chunks:', len(add_info_chunks))
+        for chunk_i, add_chunk in enumerate(add_info_chunks, start=1):
             
             print('\n==================================================================================\
                    \n==================================================================================')
-            print(f'[add chunk #{chunk_i}/{len(add_chunks)}]: fetching...')
+            print(f'[add chunk #{chunk_i}/{len(add_info_chunks)}]: fetching...')
             data = await asyncio.gather(*add_chunk)
 
             print(f'number of recieved txs:')
@@ -296,25 +355,32 @@ async def get_info_by_address_list(curr_add_list, path_fin, n=2):
             flat_data = [item for sublist in data for item in sublist]
 
             create_row_tasks = [create_row(tx) for tx in flat_data]        
-            row_chunks_size = 16
+            row_chunks_size = 5
             row_chunks = list(chunkify(create_row_tasks, row_chunks_size))
             print('rows:', len(flat_data), 'chunks:', len(row_chunks))
             for chunk_j, row_chunk in enumerate(row_chunks, start=1):
                 print(f'[row chunk #{chunk_j}/{len(row_chunks)}]: fetching...')
                 rows = await asyncio.gather(*row_chunk)
-
                 for new_row in rows:
-                    #print(f'new_row: {new_row}')
                     row, new_txs, new_inp_adds, new_outp_adds = new_row[0], new_row[1], new_row[2], new_row[3]
-                    df[row['txid']] = row
                     next_level_adds += new_inp_adds
                     next_level_adds += new_outp_adds
-                    #print(f'next_level_adds: {next_level_adds}')
+                    txid = row['txid']
+                    path = path_fin+f'/{txid}.json'
+                    if os.path.exists(path) == False:
+                        async with aiofiles.open(path, 'w') as f:
+                             await f.write(ujson.dumps(row))
 
-        finished_adds.extend(curr_add_list)
-        curr_add_list = next_level_adds
-    async with aiofiles.open(path_fin, 'a') as f:
-        await f.write(ujson.dumps(df))
+            finished_adds.extend(add_list_chunks[chunk_i-1])
+
+            async with aiofiles.open('./finished_adds', 'w') as f:
+                await f.write(ujson.dumps(finished_adds))
+
+        async with aiofiles.open(f'./{i+2}_level_adds', 'w') as f:
+            await f.write(ujson.dumps(next_level_adds))
+
+        curr_add_list_new = [add for add in next_level_adds if add not in finished_adds]
+
     
 
 async def main():
