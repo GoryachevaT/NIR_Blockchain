@@ -61,7 +61,7 @@ async def fetch(url, params=None, attempts=FETCH_ATTEMPTS, use_proxy=USE_PROXY):
             async with aiohttp.ClientSession(connector=connector) as session:
                 ua = random.choice(USER_AGENTS)
 
-                # собсна, отправляем запрос
+                # отправляем запрос
                 response = await session.get(
                     url,
                     params=params,
@@ -70,12 +70,11 @@ async def fetch(url, params=None, attempts=FETCH_ATTEMPTS, use_proxy=USE_PROXY):
                     timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT),
                 )
                 if response.status != 200:  # получили ошибку
-                    # print('proxy:', host, 'ua:', ua)
                     data = await response.text()
                     print(f'{response.url} returned HTTP {response.status}: {data}')
                     await asyncio.sleep(1.0)
                     continue  # пробуем еще раз (следующий attempt в цикле)
-                else:  # всё ок
+                else:  # успешно
                     data = await response.json()
                     return data
         except (asyncio.TimeoutError, SocksError, SocksConnectionError, ConnectionResetError, BrokenPipeError, aiohttp.client_exceptions.ClientError) as e:
